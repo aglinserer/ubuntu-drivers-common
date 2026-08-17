@@ -194,7 +194,64 @@ def system_modaliases(sys_path: Optional[str] = None) -> Dict[str, str]:
 
         aliases[modalias] = path
 
+    # Synthetic cpu:name aliases come from lscpu, which has no fake-sysfs
+    # equivalent, so only collect them for the real system.
+    if sys_path is None:
+        aliases.update(_cpu_name_modaliases())
+
     return aliases
+
+
+def _parse_cpu_name_modaliases(
+    lscpu_output: str, syspath: str = "/sys/devices/system/cpu"
+) -> Dict[str, str]:
+    """Turn `lscpu --parse=cpu,MODELNAME` output into cpu:name modaliases.
+
+    Returns a {"cpu:name:<name>": syspath} map with one entry per distinct,
+    non-empty model name. Embedded commas in a name are replaced with spaces
+    so the alias stays usable inside comma-separated package Modaliases headers.
+    """
+    aliases: Dict[str, str] = {}
+    for line in lscpu_output.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(",", 1)
+        if len(parts) < 2:
+            continue
+        name = parts[1].replace(",", " ").strip()
+        if not name:
+            continue
+        aliases["cpu:name:" + name] = syspath
+    return aliases
+
+
+def _cpu_name_modaliases() -> Dict[str, str]:
+    """Collect cpu:name modaliases for the running system via lscpu.
+
+    Uses `lscpu --parse=cpu,MODELNAME` as the only source. Any failure
+    (lscpu absent, non-zero exit, timeout) yields an empty map rather than
+    raising, so hardware detection is never blocked by it.
+    """
+    try:
+        proc = subprocess.run(
+            ["lscpu", "--parse=cpu,MODELNAME"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logging.debug("_cpu_name_modaliases(): could not run lscpu: %s", e)
+        return {}
+
+    if proc.returncode != 0:
+        logging.debug(
+            "_cpu_name_modaliases(): lscpu exited with %s: %s",
+            proc.returncode,
+            proc.stderr.strip(),
+        )
+        return {}
+
+    return _parse_cpu_name_modaliases(proc.stdout)
 
 
 def _check_video_abi_compat(apt_cache: apt_pkg.Cache, package: apt_pkg.Package) -> bool:

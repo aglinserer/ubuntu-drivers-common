@@ -229,6 +229,89 @@ class DetectTest(unittest.TestCase):
         )
         self.assertTrue(res["pci:vDEADBEEFd00"].endswith("/sys/devices/grey"))
 
+    def test_parse_cpu_name_modaliases_single(self):
+        """One alias for a single-model system, header lines skipped."""
+        output = (
+            "# The following is the parsable format\n"
+            "# CPU,Modelname\n"
+            "0,AMD Ryzen AI 7 PRO 350 w/ Radeon 860M\n"
+            "1,AMD Ryzen AI 7 PRO 350 w/ Radeon 860M\n"
+        )
+        res = UbuntuDrivers.detect._parse_cpu_name_modaliases(
+            output, "/sys/devices/system/cpu"
+        )
+        self.assertEqual(
+            res,
+            {"cpu:name:AMD Ryzen AI 7 PRO 350 w/ Radeon 860M": "/sys/devices/system/cpu"},
+        )
+
+    def test_parse_cpu_name_modaliases_distinct(self):
+        """Heterogeneous cores yield one alias per distinct name."""
+        output = (
+            "# CPU,Modelname\n"
+            "0,Cortex-A72\n"
+            "1,Cortex-A72\n"
+            "2,Cortex-A53\n"
+        )
+        res = UbuntuDrivers.detect._parse_cpu_name_modaliases(output)
+        self.assertEqual(
+            set(res),
+            {"cpu:name:Cortex-A72", "cpu:name:Cortex-A53"},
+        )
+
+    def test_parse_cpu_name_modaliases_comma_and_empty(self):
+        """Embedded commas become spaces; empty names are skipped."""
+        output = "# CPU,Modelname\n0,Weird,Chip Name\n1,\n"
+        res = UbuntuDrivers.detect._parse_cpu_name_modaliases(output)
+        self.assertEqual(set(res), {"cpu:name:Weird Chip Name"})
+
+    def test_cpu_name_modaliases_runs_lscpu(self):
+        """Wrapper spawns lscpu and parses its stdout."""
+        completed = subprocess.CompletedProcess(
+            args=["lscpu", "--parse=cpu,MODELNAME"],
+            returncode=0,
+            stdout="# CPU,Modelname\n0,Test CPU 9000\n",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=completed) as run:
+            res = UbuntuDrivers.detect._cpu_name_modaliases()
+        run.assert_called_once()
+        self.assertEqual(set(res), {"cpu:name:Test CPU 9000"})
+
+    def test_cpu_name_modaliases_missing_lscpu(self):
+        """Missing lscpu degrades to an empty map, never raises."""
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            res = UbuntuDrivers.detect._cpu_name_modaliases()
+        self.assertEqual(res, {})
+
+    def test_cpu_name_modaliases_nonzero_exit(self):
+        """Non-zero lscpu exit degrades to an empty map."""
+        completed = subprocess.CompletedProcess(
+            args=["lscpu"], returncode=1, stdout="", stderr="boom"
+        )
+        with patch("subprocess.run", return_value=completed):
+            res = UbuntuDrivers.detect._cpu_name_modaliases()
+        self.assertEqual(res, {})
+
+    def test_system_modaliases_merges_cpu_name_real(self):
+        """Real-system call (sys_path is None) merges cpu:name aliases."""
+        fake = {"cpu:name:Test CPU 9000": "/sys/devices/system/cpu"}
+        with patch.object(
+            UbuntuDrivers.detect, "_cpu_name_modaliases", return_value=fake
+        ) as helper:
+            res = UbuntuDrivers.detect.system_modaliases()
+        helper.assert_called_once()
+        self.assertEqual(res["cpu:name:Test CPU 9000"], "/sys/devices/system/cpu")
+
+    def test_system_modaliases_fake_skips_cpu_name(self):
+        """Fake-root call never invokes lscpu and adds no cpu:name alias."""
+        with patch.object(
+            UbuntuDrivers.detect, "_cpu_name_modaliases"
+        ) as helper:
+            res = UbuntuDrivers.detect.system_modaliases(self.umockdev.get_sys_dir())
+        helper.assert_not_called()
+        self.assertFalse(any(a.startswith("cpu:name:") for a in res))
+
     def test_system_driver_packages_performance(self):
         """system_driver_packages() performance for a lot of modaliases"""
 
