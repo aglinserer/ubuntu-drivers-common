@@ -242,17 +242,14 @@ class DetectTest(unittest.TestCase):
         )
         self.assertEqual(
             res,
-            {"cpu:name:AMD Ryzen AI 7 PRO 350 w/ Radeon 860M": "/sys/devices/system/cpu"},
+            {
+                "cpu:name:AMD Ryzen AI 7 PRO 350 w/ Radeon 860M": "/sys/devices/system/cpu"
+            },
         )
 
     def test_parse_cpu_name_modaliases_distinct(self):
         """Heterogeneous cores yield one alias per distinct name."""
-        output = (
-            "# CPU,Modelname\n"
-            "0,Cortex-A72\n"
-            "1,Cortex-A72\n"
-            "2,Cortex-A53\n"
-        )
+        output = "# CPU,Modelname\n" "0,Cortex-A72\n" "1,Cortex-A72\n" "2,Cortex-A53\n"
         res = UbuntuDrivers.detect._parse_cpu_name_modaliases(output)
         self.assertEqual(
             set(res),
@@ -305,12 +302,39 @@ class DetectTest(unittest.TestCase):
 
     def test_system_modaliases_fake_skips_cpu_name(self):
         """Fake-root call never invokes lscpu and adds no cpu:name alias."""
-        with patch.object(
-            UbuntuDrivers.detect, "_cpu_name_modaliases"
-        ) as helper:
+        with patch.object(UbuntuDrivers.detect, "_cpu_name_modaliases") as helper:
             res = UbuntuDrivers.detect.system_modaliases(self.umockdev.get_sys_dir())
         helper.assert_not_called()
         self.assertFalse(any(a.startswith("cpu:name:") for a in res))
+
+    def test_packages_for_modalias_cpu_name(self):
+        """A package Modaliases pattern on the cpu bus matches a cpu:name alias."""
+        chroot = aptdaemon.test.Chroot()
+        try:
+            chroot.setup()
+            chroot.add_test_repository()
+            archive = gen_fakearchive()
+            archive.create_deb(
+                "cpu-name-test",
+                extra_tags={"Modaliases": "cpuname(cpu:name:*Ryzen AI*)"},
+            )
+            chroot.add_repository(archive.path, True, False)
+
+            apt_pkg.init_config()
+            dpkg_status = os.path.abspath(
+                os.path.join(chroot.path, "var", "lib", "dpkg", "status")
+            )
+            apt_pkg.config.set("Dir::State::status", dpkg_status)
+            apt_pkg.init_system()
+            cache = apt_pkg.Cache(None)
+
+            res = UbuntuDrivers.detect.packages_for_modalias(
+                cache, "cpu:name:AMD Ryzen AI 7 PRO 350 w/ Radeon 860M"
+            )
+        finally:
+            chroot.remove()
+
+        self.assertIn("cpu-name-test", [p.name for p in res])
 
     def test_system_driver_packages_performance(self):
         """system_driver_packages() performance for a lot of modaliases"""
